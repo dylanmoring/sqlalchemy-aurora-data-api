@@ -11,13 +11,18 @@ setup(
     author_email="kislyuk@gmail.com",
     description="An AWS Aurora Serverless Data API dialect for SQLAlchemy",
     long_description=open("README.rst").read(),
-    install_requires=["sqlalchemy", "aurora-data-api >= 0.5.0"],
+    install_requires=[
+        "sqlalchemy",
+        "aurora-data-api @ git+https://github.com/dylanmoring/aurora-data-api.git@async-data-api"
+    ],
     extras_require={},
     packages=find_packages(exclude=["test"]),
     entry_points={
         "sqlalchemy.dialects": [
             "mysql.auroradataapi = sqlalchemy_aurora_data_api:AuroraMySQLDataAPIDialect",
             "postgresql.auroradataapi = sqlalchemy_aurora_data_api:AuroraPostgresDataAPIDialect",
+            "mysql.auroradataapiasync = sqlalchemy_aurora_data_api:AuroraMySQLDataAPIAsyncDialect",
+            "postgresql.auroradataapiasync = sqlalchemy_aurora_data_api:AuroraPostgresDataAPIAsyncDialect",
         ]
     },
     platforms=["MacOS X", "Posix"],

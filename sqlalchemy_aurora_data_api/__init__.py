@@ -179,8 +179,62 @@ class AuroraPostgresDataAPIDialect(PGDialect):
         return exception.args[0].value
 
 
+import importlib
+from sqlalchemy.util.concurrency import await_only
+
+# ───────────────────────────────────────────────────────────────
+# 1) Async MySQL variant
+class AuroraMySQLDataAPIAsyncDialect(AuroraMySQLDataAPIDialect):
+    """AsyncIO variant of the DataAPI MySQL dialect."""
+    driver = "aurora_data_api.async_driver"
+    is_async = True   # signal that this dialect is meant for asyncio
+    supports_statement_cache = True
+
+    @classmethod
+    def import_dbapi(cls):
+        # pull in your async driver module instead of the sync one
+        return importlib.import_module("aurora_data_api.async_driver")
+
+    def connect(self, *cargs, **cparams):
+        dbapi = self.dbapi  # the async_driver module above
+        async_conn = await_only(dbapi.connect(**cparams))
+        return dbapi.SyncAdaptedConnection(async_conn)
+
+
+# 2) Async Postgres variant
+class AuroraPostgresDataAPIAsyncDialect(AuroraPostgresDataAPIDialect):
+    """AsyncIO variant of the DataAPI Postgres dialect."""
+    driver = "aurora_data_api.async_driver"
+    is_async = True
+    supports_statement_cache = True
+
+    @classmethod
+    def import_dbapi(cls):
+        return importlib.import_module("aurora_data_api.async_driver")
+
+    def connect(self, *cargs, **cparams):
+        dbapi = self.dbapi  # the async_driver module above
+        async_conn = await_only(dbapi.connect(**cparams))
+        return dbapi.SyncAdaptedConnection(async_conn)
+
+
 def register_dialects():
     from sqlalchemy.dialects import registry
+    # sync variants (already present)
+    registry.register(
+        "mysql.auroradataapi", __name__, AuroraMySQLDataAPIDialect.__name__
+    )
+    registry.register(
+        "postgresql.auroradataapi", __name__, AuroraPostgresDataAPIDialect.__name__
+    )
 
-    registry.register("mysql.auroradataapi", __name__, AuroraMySQLDataAPIDialect.__name__)
-    registry.register("postgresql.auroradataapi", __name__, AuroraPostgresDataAPIDialect.__name__)
+    # async variants
+    registry.register(
+        "mysql.auroradataapiasync", __name__, AuroraMySQLDataAPIAsyncDialect.__name__
+    )
+    registry.register(
+        "postgresql.auroradataapiasync",
+        __name__,
+        AuroraPostgresDataAPIAsyncDialect.__name__,
+    )
+    print("Registered aurora_data_api dialects:")
