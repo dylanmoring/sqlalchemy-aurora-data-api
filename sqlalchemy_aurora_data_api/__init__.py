@@ -28,11 +28,6 @@ class _ADA_JSONB(JSONB):
         return cast(value, JSONB)
 
 
-class _ADA_UUID(UUID):
-    def bind_expression(self, value):
-        return cast(value, UUID)
-
-
 class _ADA_ENUM(ENUM):
     def bind_expression(self, value):
         return cast(value, self)
@@ -160,7 +155,6 @@ class AuroraPostgresDataAPIDialect(PGDialect):
             sqltypes.JSON: _ADA_SA_JSON,
             JSON: _ADA_JSON,
             JSONB: _ADA_JSONB,
-            UUID: _ADA_UUID,
             sqltypes.Date: _ADA_DATE,
             sqltypes.Time: _ADA_TIME,
             sqltypes.DateTime: _ADA_TIMESTAMP,
@@ -170,6 +164,7 @@ class AuroraPostgresDataAPIDialect(PGDialect):
     )
     supports_sane_multi_rowcount = False
     supports_statement_cache = True
+
 
     @classmethod
     def import_dbapi(cls):
@@ -189,6 +184,8 @@ class AuroraMySQLDataAPIAsyncDialect(AuroraMySQLDataAPIDialect):
     driver = "aurora_data_api.async_driver"
     is_async = True   # signal that this dialect is meant for asyncio
     supports_statement_cache = True
+    supports_sane_rowcount = False
+    supports_sane_rowcount_returning = True
 
     @classmethod
     def import_dbapi(cls):
@@ -207,6 +204,8 @@ class AuroraPostgresDataAPIAsyncDialect(AuroraPostgresDataAPIDialect):
     driver = "aurora_data_api.async_driver"
     is_async = True
     supports_statement_cache = True
+    supports_sane_rowcount = False
+    supports_sane_rowcount_returning = True
 
     @classmethod
     def import_dbapi(cls):
