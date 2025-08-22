@@ -144,6 +144,16 @@ class AuroraMySQLDataAPIDialect(MySQLDialect):
     def _extract_error_code(self, exception):
         return exception.args[0].value
 
+    def do_begin(self, dbapi_connection):
+        dbapi_connection.start_transaction()
+
+    # (optional but explicit) passthroughs; SA defaults would call these anyway
+    def do_commit(self, dbapi_connection):
+        dbapi_connection.commit()
+
+    def do_rollback(self, dbapi_connection):
+        dbapi_connection.rollback()
+
 
 class AuroraPostgresDataAPIDialect(PGDialect):
     # See https://docs.sqlalchemy.org/en/13/core/internals.html#sqlalchemy.engine.interfaces.Dialect
@@ -173,6 +183,15 @@ class AuroraPostgresDataAPIDialect(PGDialect):
     def _extract_error_code(self, exception):
         return exception.args[0].value
 
+    def do_begin(self, dbapi_connection):
+        dbapi_connection.start_transaction()
+
+    def do_commit(self, dbapi_connection):
+        dbapi_connection.commit()
+
+    def do_rollback(self, dbapi_connection):
+        dbapi_connection.rollback()
+
 
 import importlib
 from sqlalchemy.util.concurrency import await_only
@@ -197,6 +216,15 @@ class AuroraMySQLDataAPIAsyncDialect(AuroraMySQLDataAPIDialect):
         async_conn = await_only(dbapi.connect(**cparams))
         return dbapi.SyncAdaptedConnection(async_conn)
 
+    def do_begin(self, dbapi_connection):
+        dbapi_connection.start_transaction()
+
+    def do_commit(self, dbapi_connection):
+        dbapi_connection.commit()
+
+    def do_rollback(self, dbapi_connection):
+        dbapi_connection.rollback()
+
 
 # 2) Async Postgres variant
 class AuroraPostgresDataAPIAsyncDialect(AuroraPostgresDataAPIDialect):
@@ -215,6 +243,15 @@ class AuroraPostgresDataAPIAsyncDialect(AuroraPostgresDataAPIDialect):
         dbapi = self.dbapi  # the async_driver module above
         async_conn = await_only(dbapi.connect(**cparams))
         return dbapi.SyncAdaptedConnection(async_conn)
+
+    def do_begin(self, dbapi_connection):
+        dbapi_connection.start_transaction()
+
+    def do_commit(self, dbapi_connection):
+        dbapi_connection.commit()
+
+    def do_rollback(self, dbapi_connection):
+        dbapi_connection.rollback()
 
 
 def register_dialects():
