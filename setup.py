@@ -13,7 +13,7 @@ setup(
     long_description=open("README.rst").read(),
     install_requires=[
         "sqlalchemy",
-        "aurora-data-api @ git+https://github.com/dylanmoring/aurora-data-api.git@async-data-api"
+        "aurora-data-api @ git+https://github.com/dylanmoring/aurora-data-api.git"
     ],
     extras_require={},
     packages=find_packages(exclude=["test"]),
