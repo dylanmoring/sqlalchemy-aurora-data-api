@@ -39,8 +39,12 @@ class _ADA_DATETIME_MIXIN:
 
     @staticmethod
     def ms(value):
-        # Three digit fractional second component, truncated and zero padded. This is what the data api requires.
-        return str(value.microsecond).zfill(6)[:-3]
+        # Six-digit zero-padded microsecond component. (The old version
+        # truncated to milliseconds — ``[:-3]`` — which silently lost the
+        # bottom three digits of the input timestamp and made round-tripping
+        # ``datetime`` values lossy. Data API accepts six-digit fractional
+        # seconds; SQLAlchemy's compliance suite verifies full precision.)
+        return str(value.microsecond).zfill(6)
 
     def bind_processor(self, dialect):
         def process(value):
@@ -159,6 +163,10 @@ class AuroraPostgresDataAPIDialect(PGDialect):
     # See https://docs.sqlalchemy.org/en/13/core/internals.html#sqlalchemy.engine.interfaces.Dialect
     driver = "aurora_data_api"
     default_schema_name = None
+    # Data API returns numeric/decimal columns as Decimal objects natively.
+    # Without this flag, ``Numeric(asdecimal=False)`` columns return Decimal
+    # because SQLAlchemy doesn't apply ``to_float`` in its result processor.
+    supports_native_decimal = True
     colspecs = util.update_copy(
         PGDialect.colspecs,
         {
@@ -194,7 +202,17 @@ class AuroraPostgresDataAPIDialect(PGDialect):
 
 
 import importlib
+from sqlalchemy import pool
 from sqlalchemy.util.concurrency import await_only
+
+# Explicitly load the base postgres and mysql provisioning so their
+# ``@for_db(...)`` registrations (e.g. ``temp_table_keyword_args``,
+# ``create_db``, ``drop_db``) are available for compliance-suite fixtures.
+# Without this they never load — our dialect's ``__module__`` is the bare
+# ``sqlalchemy_aurora_data_api``, so ``cls.load_provisioning`` resolves
+# its package to ``""`` and silently fails to import any provision module.
+from sqlalchemy.dialects.postgresql import provision as _pg_provision  # noqa: F401
+from sqlalchemy.dialects.mysql import provision as _mysql_provision  # noqa: F401
 
 # ───────────────────────────────────────────────────────────────
 # 1) Async MySQL variant
@@ -211,10 +229,17 @@ class AuroraMySQLDataAPIAsyncDialect(AuroraMySQLDataAPIDialect):
         # pull in your async driver module instead of the sync one
         return importlib.import_module("aurora_data_api.async_driver")
 
+    @classmethod
+    def get_pool_class(cls, url):
+        # Match SQLAlchemy's reference shape for async dialects (see
+        # PGDialect_asyncpg.get_pool_class). Without this override the
+        # create_engine guard refuses QueuePool against an is_async dialect.
+        return pool.AsyncAdaptedQueuePool
+
     def connect(self, *cargs, **cparams):
         dbapi = self.dbapi  # the async_driver module above
         async_conn = await_only(dbapi.connect(**cparams))
-        return dbapi.SyncAdaptedConnection(async_conn)
+        return dbapi.AuroraDataAPIAsyncAdaptConnection(dbapi, async_conn)
 
     def do_begin(self, dbapi_connection):
         dbapi_connection.start_transaction()
@@ -239,10 +264,14 @@ class AuroraPostgresDataAPIAsyncDialect(AuroraPostgresDataAPIDialect):
     def import_dbapi(cls):
         return importlib.import_module("aurora_data_api.async_driver")
 
+    @classmethod
+    def get_pool_class(cls, url):
+        return pool.AsyncAdaptedQueuePool
+
     def connect(self, *cargs, **cparams):
         dbapi = self.dbapi  # the async_driver module above
         async_conn = await_only(dbapi.connect(**cparams))
-        return dbapi.SyncAdaptedConnection(async_conn)
+        return dbapi.AuroraDataAPIAsyncAdaptConnection(dbapi, async_conn)
 
     def do_begin(self, dbapi_connection):
         dbapi_connection.start_transaction()
