@@ -204,6 +204,8 @@ def _patch_generate_subscripts_for_data_api():
         "pg_get_indexdef": {1},
     }
 
+    from sqlalchemy.sql.elements import Cast as _Cast
+
     class _AuroraDataAPIPGCompiler(PGCompiler):
         def visit_function(self, func, *args, **kw):
             positions = _INTEGER_CAST_POSITIONS.get(func.name)
@@ -214,11 +216,19 @@ def _patch_generate_subscripts_for_data_api():
                     if i >= len(clauses):
                         continue
                     c = clauses[i]
-                    # Wrap if it's a bare integer bind. Avoid double-casting
-                    # when the caller already wrapped in CAST.
-                    if isinstance(c, BindParameter) and isinstance(c.value, int):
-                        clauses[i] = sql_cast(c, INTEGER)
-                        changed = True
+                    # Skip if the caller already wrapped this arg in a CAST.
+                    if isinstance(c, _Cast):
+                        continue
+                    # The function signature requires ``integer`` at this
+                    # position; Data API marshals Python ``int`` as
+                    # ``bigint`` and ``int + int`` BinaryExpressions also
+                    # come out as ``bigint``, so wrap the whole expression
+                    # (whether bind, BinaryExpr, or column ref) in
+                    # ``CAST(... AS INTEGER)``. Idempotent: a CAST around a
+                    # value that's already integer is a no-op at the PG
+                    # type system level.
+                    clauses[i] = sql_cast(c, INTEGER)
+                    changed = True
                 if changed:
                     new_func = sql_functions.Function(func.name, *clauses)
                     return super().visit_function(new_func, *args, **kw)
