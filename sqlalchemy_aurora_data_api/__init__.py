@@ -190,25 +190,37 @@ def _patch_generate_subscripts_for_data_api():
 
     from sqlalchemy.dialects.postgresql.base import PGCompiler
 
+    # PG functions where SA passes a Python ``int`` literal as a positional
+    # argument that PG needs to see as ``integer`` (not ``bigint``). Data
+    # API marshals every Python ``int`` as ``bigint``, so without an
+    # explicit cast PG reports ``function foo(..., bigint, ...) does not
+    # exist`` for each of these.
+    #
+    # Entries: ``func_name -> set(int positions)``. Position is 0-indexed.
+    _INTEGER_CAST_POSITIONS = {
+        # generate_subscripts(anyarray, integer [, integer])
+        "generate_subscripts": {1, 2},
+        # pg_get_indexdef(oid, integer, boolean)
+        "pg_get_indexdef": {1},
+    }
+
     class _AuroraDataAPIPGCompiler(PGCompiler):
         def visit_function(self, func, *args, **kw):
-            if (
-                func.name == "generate_subscripts"
-                and len(func.clauses.clauses) == 2
-            ):
-                second = func.clauses.clauses[1]
-                # Only wrap if it's a bare-int bind parameter or an integer
-                # literal — avoids double-casting if someone already cast it.
-                if isinstance(second, BindParameter) and isinstance(
-                    second.value, int
-                ):
-                    new_clauses = [
-                        func.clauses.clauses[0],
-                        sql_cast(second, INTEGER),
-                    ]
-                    new_func = sql_functions.Function(
-                        "generate_subscripts", *new_clauses
-                    )
+            positions = _INTEGER_CAST_POSITIONS.get(func.name)
+            if positions is not None:
+                clauses = list(func.clauses.clauses)
+                changed = False
+                for i in positions:
+                    if i >= len(clauses):
+                        continue
+                    c = clauses[i]
+                    # Wrap if it's a bare integer bind. Avoid double-casting
+                    # when the caller already wrapped in CAST.
+                    if isinstance(c, BindParameter) and isinstance(c.value, int):
+                        clauses[i] = sql_cast(c, INTEGER)
+                        changed = True
+                if changed:
+                    new_func = sql_functions.Function(func.name, *clauses)
                     return super().visit_function(new_func, *args, **kw)
             return super().visit_function(func, *args, **kw)
 
