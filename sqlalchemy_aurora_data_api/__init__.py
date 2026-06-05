@@ -275,6 +275,20 @@ def _patch_pg_catalog_char_columns_for_data_api():
         def column_expression(self, col):
             return sql.cast(col, Text)
 
+    class _VectorCastedToText(pg_catalog.INT2VECTOR):
+        """``int2vector`` / ``oidvector`` that emits ``CAST(<col> AS
+        TEXT)`` in SELECT lists. Data API doesn't accept either internal
+        type in result sets (same family as the ``char`` rejection).
+        Same surgical workaround: TypeDecorator subclass that overrides
+        ``column_expression``. The text form (e.g. ``'1 2 3'``) is what
+        SA's ``_SpaceVector`` result processor expects anyway, so the
+        round-trip stays compatible.
+        """
+        impl = pg_catalog.INT2VECTOR.impl
+        cache_ok = True
+        def column_expression(self, col):
+            return sql.cast(col, Text)
+
     # The catalog columns SA's PG dialect declares with CHAR. Reference:
     # sqlalchemy/dialects/postgresql/pg_catalog.py (lines 120, 121, 130,
     # 145, 146, 149, 160, 161, 209, 210, 214, 215, 228, 237, 238, 239, 294,
@@ -304,6 +318,16 @@ def _patch_pg_catalog_char_columns_for_data_api():
         col = table.c.get(colname)
         if col is not None and isinstance(col.type, CHAR):
             col.type = casted
+
+    # int2vector / oidvector columns on pg_index — same Data API rejection
+    # ("unsupported data type int2vector") on the result side, same
+    # ``CAST(... AS TEXT)`` workaround. SA's ``_SpaceVector`` result
+    # processor parses the textual ``'1 2 3'`` form anyway.
+    vector_casted = _VectorCastedToText()
+    for colname in ("indkey", "indcollation", "indclass", "indoption"):
+        col = pg_catalog.pg_index.c.get(colname)
+        if col is not None:
+            col.type = vector_casted
 
 
 _patch_pg_catalog_char_columns_for_data_api()
