@@ -159,6 +159,156 @@ class AuroraMySQLDataAPIDialect(MySQLDialect):
         dbapi_connection.rollback()
 
 
+def _patch_generate_subscripts_for_data_api():
+    """Aurora Data API marshals Python ``int`` values as ``bigint``. PG's
+    ``generate_subscripts`` only has overloads taking ``anyarray, integer[,
+    integer]`` — no ``bigint`` overload — so SA's catalog queries that pass
+    a literal ``1`` (in ``_constraint_query`` / ``_index_query``) fail with
+    ``function generate_subscripts(int2vector, bigint) does not exist``.
+
+    Diagnosed and worked around the same way at
+    https://github.com/sqlalchemy/sqlalchemy/discussions/11269 — wrap the
+    literal in ``sql.cast(1, INTEGER)`` so PG sees an explicit integer.
+
+    We patch ``sql.func.generate_subscripts`` invocations at SQL emit time
+    via a SQLAlchemy compiler hook bound to our dialect names. This avoids
+    copy-pasting ~200 LOC of upstream catalog-query builders and survives
+    upstream changes to those builders.
+    """
+    from sqlalchemy.sql import functions as sql_functions
+    from sqlalchemy.sql.elements import BindParameter
+    from sqlalchemy.ext.compiler import compiles
+    from sqlalchemy import INTEGER, cast as sql_cast
+
+    # ``sql.func.generate_subscripts`` produces an instance of the generic
+    # ``Function`` class with ``name="generate_subscripts"``. We can't
+    # ``@compiles`` against a generic Function by name, but we CAN hook
+    # ``visit_function`` on our compiler. Define a per-dialect compiler
+    # class below.
+
+    # Register the compiler against both async + sync dialect names.
+
+    from sqlalchemy.dialects.postgresql.base import PGCompiler
+
+    # PG functions where SA passes a Python ``int`` literal as a positional
+    # argument that PG needs to see as ``integer`` (not ``bigint``). Data
+    # API marshals every Python ``int`` as ``bigint``, so without an
+    # explicit cast PG reports ``function foo(..., bigint, ...) does not
+    # exist`` for each of these.
+    #
+    # Entries: ``func_name -> set(int positions)``. Position is 0-indexed.
+    _INTEGER_CAST_POSITIONS = {
+        # generate_subscripts(anyarray, integer [, integer])
+        "generate_subscripts": {1, 2},
+        # pg_get_indexdef(oid, integer, boolean)
+        "pg_get_indexdef": {1},
+    }
+
+    from sqlalchemy.sql.elements import Cast as _Cast
+
+    class _AuroraDataAPIPGCompiler(PGCompiler):
+        def visit_function(self, func, *args, **kw):
+            positions = _INTEGER_CAST_POSITIONS.get(func.name)
+            if positions is not None:
+                clauses = list(func.clauses.clauses)
+                changed = False
+                for i in positions:
+                    if i >= len(clauses):
+                        continue
+                    c = clauses[i]
+                    # Skip if the caller already wrapped this arg in a CAST.
+                    if isinstance(c, _Cast):
+                        continue
+                    # The function signature requires ``integer`` at this
+                    # position; Data API marshals Python ``int`` as
+                    # ``bigint`` and ``int + int`` BinaryExpressions also
+                    # come out as ``bigint``, so wrap the whole expression
+                    # (whether bind, BinaryExpr, or column ref) in
+                    # ``CAST(... AS INTEGER)``. Idempotent: a CAST around a
+                    # value that's already integer is a no-op at the PG
+                    # type system level.
+                    clauses[i] = sql_cast(c, INTEGER)
+                    changed = True
+                if changed:
+                    new_func = sql_functions.Function(func.name, *clauses)
+                    return super().visit_function(new_func, *args, **kw)
+            return super().visit_function(func, *args, **kw)
+
+    return _AuroraDataAPIPGCompiler
+
+
+_AuroraDataAPIPGCompiler = _patch_generate_subscripts_for_data_api()
+
+
+def _patch_pg_catalog_char_columns_for_data_api():
+    """Aurora Data API rejects result sets that contain Postgres' internal
+    one-byte ``"char"`` type with ``UnsupportedResultException: The result
+    contains the unsupported data type "CHAR"``. AWS documents the
+    workaround as casting to TEXT:
+    https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/data-api.troubleshooting.html#data-api.troubleshooting.unsupported-result
+
+    SA's ``sqlalchemy.dialects.postgresql.pg_catalog`` Table objects declare
+    18 such columns (``pg_class.relkind``, ``pg_attribute.attidentity``,
+    ``pg_constraint.contype``, etc.) as ``Column("...", CHAR)``. Every
+    catalog SELECT that includes these columns trips the Data API.
+
+    The fix: subclass the SA ``CHAR`` type and override
+    ``column_expression`` — SA calls that hook on every column in a SELECT
+    list to give the type a chance to wrap itself (CAST, COALESCE,
+    decode, etc.). Returning ``sql.cast(col, Text)`` makes every catalog
+    query emit ``CAST(pg_class.relkind AS TEXT)``. Then we walk the
+    ``pg_catalog`` tables once at import and replace the ``.type`` on
+    each affected column.
+
+    Critically, this is dialect-scoped (we only mutate the type to our
+    subclass — the original ``CHAR`` semantics are preserved for any
+    other dialect that imports SA in the same process), and it leaves
+    WHERE-clause / JOIN-on column references untouched (those don't go
+    through ``column_expression``).
+    """
+    from sqlalchemy.dialects.postgresql import pg_catalog
+    from sqlalchemy.sql.sqltypes import CHAR
+    from sqlalchemy import sql, Text
+
+    class _CharCastedToText(CHAR):
+        """``CHAR`` that emits ``CAST(<col> AS TEXT)`` in SELECT lists."""
+        def column_expression(self, col):
+            return sql.cast(col, Text)
+
+    # The catalog columns SA's PG dialect declares with CHAR. Reference:
+    # sqlalchemy/dialects/postgresql/pg_catalog.py (lines 120, 121, 130,
+    # 145, 146, 149, 160, 161, 209, 210, 214, 215, 228, 237, 238, 239, 294,
+    # 304 in SA 2.0.50).
+    targets = [
+        (pg_catalog.pg_class, "relkind"),
+        (pg_catalog.pg_class, "relpersistence"),
+        (pg_catalog.pg_class, "relreplident"),
+        (pg_catalog.pg_type, "typtype"),
+        (pg_catalog.pg_type, "typcategory"),
+        (pg_catalog.pg_type, "typdelim"),
+        (pg_catalog.pg_type, "typalign"),
+        (pg_catalog.pg_type, "typstorage"),
+        (pg_catalog.pg_attribute, "attstorage"),
+        (pg_catalog.pg_attribute, "attalign"),
+        (pg_catalog.pg_attribute, "attidentity"),
+        (pg_catalog.pg_attribute, "attgenerated"),
+        (pg_catalog.pg_constraint, "contype"),
+        (pg_catalog.pg_constraint, "confupdtype"),
+        (pg_catalog.pg_constraint, "confdeltype"),
+        (pg_catalog.pg_constraint, "confmatchtype"),
+        (pg_catalog.pg_am, "amtype"),
+        (pg_catalog.pg_collation, "collprovider"),
+    ]
+    casted = _CharCastedToText()
+    for table, colname in targets:
+        col = table.c.get(colname)
+        if col is not None and isinstance(col.type, CHAR):
+            col.type = casted
+
+
+_patch_pg_catalog_char_columns_for_data_api()
+
+
 class AuroraPostgresDataAPIDialect(PGDialect):
     # See https://docs.sqlalchemy.org/en/13/core/internals.html#sqlalchemy.engine.interfaces.Dialect
     driver = "aurora_data_api"
@@ -167,6 +317,9 @@ class AuroraPostgresDataAPIDialect(PGDialect):
     # Without this flag, ``Numeric(asdecimal=False)`` columns return Decimal
     # because SQLAlchemy doesn't apply ``to_float`` in its result processor.
     supports_native_decimal = True
+    # Wraps ``generate_subscripts(int2vector, 1)`` so Data API's bigint
+    # marshalling of the literal ``1`` doesn't break PG catalog reflection.
+    statement_compiler = _AuroraDataAPIPGCompiler
     colspecs = util.update_copy(
         PGDialect.colspecs,
         {
