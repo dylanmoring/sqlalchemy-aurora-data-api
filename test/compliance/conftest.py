@@ -182,3 +182,24 @@ def pytest_sessionstart(session):
 
     base_fixtures.TestBase.connection_no_trans = _cfg.fixture()(_connection_no_trans)
     base_fixtures.TestBase.connection = _cfg.fixture()(_connection)
+
+    # ``drop_all_tables_from_metadata(metadata, engine)`` does
+    # ``with engine.begin()`` which returns ``_AsyncGeneratorContextManager``
+    # for AsyncEngine — same async/sync ctx-manager mismatch. Wrap the
+    # function so its engine argument is always the sync proxy.
+    from sqlalchemy.testing import util as testing_util
+
+    _orig_drop_all = testing_util.drop_all_tables_from_metadata
+
+    def _patched_drop_all(metadata, engine_or_connection):
+        if engine_or_connection is not None and hasattr(
+            engine_or_connection, "sync_engine"
+        ):
+            engine_or_connection = engine_or_connection.sync_engine
+        return _orig_drop_all(metadata, engine_or_connection)
+
+    testing_util.drop_all_tables_from_metadata = _patched_drop_all
+
+    # ``base_fixtures.drop_all_tables_from_metadata`` is the same name
+    # re-bound at import time — patch it too.
+    base_fixtures.drop_all_tables_from_metadata = _patched_drop_all
