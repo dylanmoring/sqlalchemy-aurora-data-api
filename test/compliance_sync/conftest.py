@@ -64,3 +64,20 @@ registry.register(
 
 pytest.register_assert_rewrite("sqlalchemy.testing.assertions")
 from sqlalchemy.testing.plugin.pytestplugin import *  # noqa: E402, F401, F403
+
+
+# SA's pytestplugin reads ``setup.cfg`` and populates
+# ``plugin_base.file_config`` during its ``pytest_configure``. ``_engine_uri``
+# (the hook that builds the test engine) then reads
+# ``file_config["db"]["default"]`` at ``post_begin`` time. Our setup.cfg
+# default URL is the async one (shared with the async compliance suite);
+# remap default -> the ``sync`` entry so this directory actually drives
+# the sync dialect / driver (``postgresql+auroradataapi://``).
+_plugin_pytest_configure = pytest_configure  # noqa: F405
+
+
+def pytest_configure(config):
+    _plugin_pytest_configure(config)
+    from sqlalchemy.testing.plugin import plugin_base
+    sync_url = plugin_base.file_config.get("db", "sync")
+    plugin_base.file_config.set("db", "default", sync_url)
