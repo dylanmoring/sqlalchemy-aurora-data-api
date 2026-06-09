@@ -159,85 +159,58 @@ class AuroraMySQLDataAPIDialect(MySQLDialect):
         dbapi_connection.rollback()
 
 
-def _patch_generate_subscripts_for_data_api():
-    """Aurora Data API marshals Python ``int`` values as ``bigint``. PG's
-    ``generate_subscripts`` only has overloads taking ``anyarray, integer[,
-    integer]`` — no ``bigint`` overload — so SA's catalog queries that pass
-    a literal ``1`` (in ``_constraint_query`` / ``_index_query``) fail with
-    ``function generate_subscripts(int2vector, bigint) does not exist``.
+from sqlalchemy.sql import functions as sql_functions
+from sqlalchemy.sql.elements import Cast as _Cast
+from sqlalchemy.dialects.postgresql.base import PGCompiler
+from sqlalchemy import INTEGER, cast as sql_cast
 
-    Diagnosed and worked around the same way at
-    https://github.com/sqlalchemy/sqlalchemy/discussions/11269 — wrap the
-    literal in ``sql.cast(1, INTEGER)`` so PG sees an explicit integer.
-
-    We patch ``sql.func.generate_subscripts`` invocations at SQL emit time
-    via a SQLAlchemy compiler hook bound to our dialect names. This avoids
-    copy-pasting ~200 LOC of upstream catalog-query builders and survives
-    upstream changes to those builders.
-    """
-    from sqlalchemy.sql import functions as sql_functions
-    from sqlalchemy.sql.elements import BindParameter
-    from sqlalchemy.ext.compiler import compiles
-    from sqlalchemy import INTEGER, cast as sql_cast
-
-    # ``sql.func.generate_subscripts`` produces an instance of the generic
-    # ``Function`` class with ``name="generate_subscripts"``. We can't
-    # ``@compiles`` against a generic Function by name, but we CAN hook
-    # ``visit_function`` on our compiler. Define a per-dialect compiler
-    # class below.
-
-    # Register the compiler against both async + sync dialect names.
-
-    from sqlalchemy.dialects.postgresql.base import PGCompiler
-
-    # PG functions where SA passes a Python ``int`` literal as a positional
-    # argument that PG needs to see as ``integer`` (not ``bigint``). Data
-    # API marshals every Python ``int`` as ``bigint``, so without an
-    # explicit cast PG reports ``function foo(..., bigint, ...) does not
-    # exist`` for each of these.
-    #
-    # Entries: ``func_name -> set(int positions)``. Position is 0-indexed.
-    _INTEGER_CAST_POSITIONS = {
-        # generate_subscripts(anyarray, integer [, integer])
-        "generate_subscripts": {1, 2},
-        # pg_get_indexdef(oid, integer, boolean)
-        "pg_get_indexdef": {1},
-    }
-
-    from sqlalchemy.sql.elements import Cast as _Cast
-
-    class _AuroraDataAPIPGCompiler(PGCompiler):
-        def visit_function(self, func, *args, **kw):
-            positions = _INTEGER_CAST_POSITIONS.get(func.name)
-            if positions is not None:
-                clauses = list(func.clauses.clauses)
-                changed = False
-                for i in positions:
-                    if i >= len(clauses):
-                        continue
-                    c = clauses[i]
-                    # Skip if the caller already wrapped this arg in a CAST.
-                    if isinstance(c, _Cast):
-                        continue
-                    # The function signature requires ``integer`` at this
-                    # position; Data API marshals Python ``int`` as
-                    # ``bigint`` and ``int + int`` BinaryExpressions also
-                    # come out as ``bigint``, so wrap the whole expression
-                    # (whether bind, BinaryExpr, or column ref) in
-                    # ``CAST(... AS INTEGER)``. Idempotent: a CAST around a
-                    # value that's already integer is a no-op at the PG
-                    # type system level.
-                    clauses[i] = sql_cast(c, INTEGER)
-                    changed = True
-                if changed:
-                    new_func = sql_functions.Function(func.name, *clauses)
-                    return super().visit_function(new_func, *args, **kw)
-            return super().visit_function(func, *args, **kw)
-
-    return _AuroraDataAPIPGCompiler
+# PG functions where SA passes a Python ``int`` literal as a positional
+# argument that PG needs to see as ``integer`` (not ``bigint``). Aurora Data
+# API marshals every Python ``int`` as ``bigint``, so without an explicit
+# cast PG reports ``function foo(..., bigint, ...) does not exist`` for each
+# of these. Entries: ``func_name -> set(int positions)``, 0-indexed.
+#
+# Diagnosed and worked around the same way at
+# https://github.com/sqlalchemy/sqlalchemy/discussions/11269 — wrap the
+# literal in ``cast(..., INTEGER)`` so PG sees an explicit integer. We do it
+# at SQL emit time via the ``visit_function`` compiler hook below (wired up
+# through the dialect's ``statement_compiler`` attr) rather than copy-pasting
+# ~200 LOC of upstream catalog-query builders, so it survives upstream
+# changes to those builders.
+_INTEGER_CAST_POSITIONS = {
+    # generate_subscripts(anyarray, integer [, integer])
+    "generate_subscripts": {1, 2},
+    # pg_get_indexdef(oid, integer, boolean)
+    "pg_get_indexdef": {1},
+}
 
 
-_AuroraDataAPIPGCompiler = _patch_generate_subscripts_for_data_api()
+class _AuroraDataAPIPGCompiler(PGCompiler):
+    def visit_function(self, func, *args, **kw):
+        positions = _INTEGER_CAST_POSITIONS.get(func.name)
+        if positions is not None:
+            clauses = list(func.clauses.clauses)
+            changed = False
+            for i in positions:
+                if i >= len(clauses):
+                    continue
+                c = clauses[i]
+                # Skip if the caller already wrapped this arg in a CAST.
+                if isinstance(c, _Cast):
+                    continue
+                # The function signature requires ``integer`` at this
+                # position; Data API marshals Python ``int`` as ``bigint``
+                # and ``int + int`` BinaryExpressions also come out as
+                # ``bigint``, so wrap the whole expression (whether bind,
+                # BinaryExpr, or column ref) in ``CAST(... AS INTEGER)``.
+                # Idempotent: a CAST around a value that's already integer
+                # is a no-op at the PG type system level.
+                clauses[i] = sql_cast(c, INTEGER)
+                changed = True
+            if changed:
+                new_func = sql_functions.Function(func.name, *clauses)
+                return super().visit_function(new_func, *args, **kw)
+        return super().visit_function(func, *args, **kw)
 
 
 def _patch_pg_catalog_char_columns_for_data_api():
@@ -404,9 +377,12 @@ from sqlalchemy.dialects.postgresql import provision as _pg_provision  # noqa: F
 from sqlalchemy.dialects.mysql import provision as _mysql_provision  # noqa: F401
 
 # ───────────────────────────────────────────────────────────────
-# 1) Async MySQL variant
-class AuroraMySQLDataAPIAsyncDialect(AuroraMySQLDataAPIDialect):
-    """AsyncIO variant of the DataAPI MySQL dialect."""
+# Async variants. The async behavior (driver module, is_async, pool class,
+# greenlet-bridged connect) is database-agnostic, so it lives in one mixin
+# that's listed ahead of the sync base. The sync base still supplies
+# colspecs, the ``do_*`` transaction handling, error extraction, etc.
+class _AuroraDataAPIAsyncMixin:
+    """Shared AsyncIO behavior for the DataAPI dialects."""
     driver = "aurora_data_api.async_driver"
     is_async = True   # signal that this dialect is meant for asyncio
     supports_statement_cache = True
@@ -415,7 +391,6 @@ class AuroraMySQLDataAPIAsyncDialect(AuroraMySQLDataAPIDialect):
 
     @classmethod
     def import_dbapi(cls):
-        # pull in your async driver module instead of the sync one
         return importlib.import_module("aurora_data_api.async_driver")
 
     @classmethod
@@ -426,50 +401,17 @@ class AuroraMySQLDataAPIAsyncDialect(AuroraMySQLDataAPIDialect):
         return pool.AsyncAdaptedQueuePool
 
     def connect(self, *cargs, **cparams):
-        dbapi = self.dbapi  # the async_driver module above
+        dbapi = self.dbapi  # the async_driver module
         async_conn = await_only(dbapi.connect(**cparams))
         return dbapi.AuroraDataAPIAsyncAdaptConnection(dbapi, async_conn)
 
-    def do_begin(self, dbapi_connection):
-        dbapi_connection.start_transaction()
 
-    def do_commit(self, dbapi_connection):
-        dbapi_connection.commit()
-
-    def do_rollback(self, dbapi_connection):
-        dbapi_connection.rollback()
+class AuroraMySQLDataAPIAsyncDialect(_AuroraDataAPIAsyncMixin, AuroraMySQLDataAPIDialect):
+    """AsyncIO variant of the DataAPI MySQL dialect."""
 
 
-# 2) Async Postgres variant
-class AuroraPostgresDataAPIAsyncDialect(AuroraPostgresDataAPIDialect):
+class AuroraPostgresDataAPIAsyncDialect(_AuroraDataAPIAsyncMixin, AuroraPostgresDataAPIDialect):
     """AsyncIO variant of the DataAPI Postgres dialect."""
-    driver = "aurora_data_api.async_driver"
-    is_async = True
-    supports_statement_cache = True
-    supports_sane_rowcount = False
-    supports_sane_rowcount_returning = True
-
-    @classmethod
-    def import_dbapi(cls):
-        return importlib.import_module("aurora_data_api.async_driver")
-
-    @classmethod
-    def get_pool_class(cls, url):
-        return pool.AsyncAdaptedQueuePool
-
-    def connect(self, *cargs, **cparams):
-        dbapi = self.dbapi  # the async_driver module above
-        async_conn = await_only(dbapi.connect(**cparams))
-        return dbapi.AuroraDataAPIAsyncAdaptConnection(dbapi, async_conn)
-
-    def do_begin(self, dbapi_connection):
-        dbapi_connection.start_transaction()
-
-    def do_commit(self, dbapi_connection):
-        dbapi_connection.commit()
-
-    def do_rollback(self, dbapi_connection):
-        dbapi_connection.rollback()
 
 
 def register_dialects():
