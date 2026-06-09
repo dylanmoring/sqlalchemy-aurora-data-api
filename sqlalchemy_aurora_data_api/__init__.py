@@ -377,10 +377,13 @@ from sqlalchemy.dialects.postgresql import provision as _pg_provision  # noqa: F
 from sqlalchemy.dialects.mysql import provision as _mysql_provision  # noqa: F401
 
 # ───────────────────────────────────────────────────────────────
-# Async variants. The async behavior (driver module, is_async, pool class,
-# greenlet-bridged connect) is database-agnostic, so it lives in one mixin
-# that's listed ahead of the sync base. The sync base still supplies
-# colspecs, the ``do_*`` transaction handling, error extraction, etc.
+# Async variants. The mixin holds ONLY async-divergent, database-agnostic
+# behavior (driver module, is_async, pool class, greenlet-bridged connect)
+# and is listed first so those win over the sync base. Invariant: anything
+# database-specific (colspecs, ``do_*`` transaction handling, error
+# extraction, ``statement_compiler``) must stay on the sync base — both
+# async dialects share this one mixin, so a DB-specific attr added here
+# would silently clobber one backend's specialization.
 class _AuroraDataAPIAsyncMixin:
     """Shared AsyncIO behavior for the DataAPI dialects."""
     driver = "aurora_data_api.async_driver"
