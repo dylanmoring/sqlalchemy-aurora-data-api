@@ -412,9 +412,16 @@ class _AuroraDataAPIAsyncMixin:
 class AuroraMySQLDataAPIAsyncDialect(_AuroraDataAPIAsyncMixin, AuroraMySQLDataAPIDialect):
     """AsyncIO variant of the DataAPI MySQL dialect."""
 
+    # SA's _supports_statement_cache check reads cls.__dict__ directly
+    # (engine/default.py:462), so inheriting from the mixin doesn't satisfy
+    # it -- the attribute has to live on each concrete dialect class.
+    supports_statement_cache = True
+
 
 class AuroraPostgresDataAPIAsyncDialect(_AuroraDataAPIAsyncMixin, AuroraPostgresDataAPIDialect):
     """AsyncIO variant of the DataAPI Postgres dialect."""
+
+    supports_statement_cache = True
 
 
 def register_dialects():
