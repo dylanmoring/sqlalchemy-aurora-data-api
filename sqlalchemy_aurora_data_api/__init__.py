@@ -4,7 +4,7 @@ sqlalchemy-aurora-data-api
 
 import json, datetime, re
 
-from sqlalchemy import cast, func, util
+from sqlalchemy import cast, func, type_coerce, util
 import sqlalchemy.sql.sqltypes as sqltypes
 from sqlalchemy.dialects.postgresql.base import PGDialect
 from sqlalchemy.dialects.postgresql import JSON, JSONB, UUID, DATE, TIME, TIMESTAMP, ARRAY, ENUM
@@ -97,6 +97,20 @@ class _ADA_DATE(_ADA_DATETIME_MIXIN, DATE):
 class _ADA_TIME(_ADA_DATETIME_MIXIN, TIME):
     py_type = datetime.time
     sa_type = sqltypes.Time
+
+    def column_expression(self, col):
+        # The Data API rejects TIMETZ result columns outright
+        # (``UnsupportedResultException: The result contains the
+        # unsupported data type TIMETZ``) — same service wall as the
+        # pg_catalog CHAR/int2vector columns. Cast to text in SELECT
+        # lists; the mixin's result_processor parses the ``HH:MM:SS+TZ``
+        # string back into a tz-aware ``datetime.time``. The
+        # ``type_coerce`` keeps the wrapped expression typed as *this*
+        # type — a bare ``cast(col, Text)`` would retype the result
+        # column as Text and bypass our result_processor entirely.
+        if self.timezone:
+            return type_coerce(cast(col, sqltypes.Text), self)
+        return col
 
     def bind_processor(self, dialect):
         def process(value):
@@ -398,7 +412,10 @@ class _AuroraDataAPIAsyncMixin:
     driver = "aurora_data_api.async_driver"
     is_async = True   # signal that this dialect is meant for asyncio
     supports_statement_cache = True
-    supports_sane_rowcount = False
+    # The async cursor reports rowcount identically to the sync one
+    # (numberOfRecordsUpdated / len(records)), and SQLAlchemy's
+    # AsyncAdapt_dbapi_cursor proxies it straight through.
+    supports_sane_rowcount = True
     supports_sane_rowcount_returning = True
 
     @classmethod
