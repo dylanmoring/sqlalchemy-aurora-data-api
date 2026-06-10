@@ -53,7 +53,12 @@ class _ADA_DATETIME_MIXIN:
         return process
 
     def bind_expression(self, value):
-        return cast(value, self.sa_type)
+        # Cast to ``self``, not the bare ``sa_type`` class — the instance
+        # carries the ``timezone=True`` flag, so this renders
+        # ``CAST(... AS TIMESTAMP WITH TIME ZONE)``. The Data API typeHint
+        # enum has no TIMESTAMPTZ, so this explicit cast is the only way PG
+        # learns an untyped bind is tz-aware.
+        return cast(value, self)
 
     def result_processor(self, dialect, coltype):
         def process(value):
@@ -95,7 +100,10 @@ class _ADA_TIME(_ADA_DATETIME_MIXIN, TIME):
 
     def bind_processor(self, dialect):
         def process(value):
-            return value.strftime("%H:%M:%S.") + self.ms(value) if isinstance(value, self.py_type) else value
+            # isoformat keeps the six-digit microseconds AND appends the
+            # UTC offset for tz-aware values, which the WITH TIME ZONE cast
+            # in bind_expression needs to interpret the string correctly.
+            return value.isoformat(timespec="microseconds") if isinstance(value, self.py_type) else value
 
         return process
 
@@ -106,7 +114,8 @@ class _ADA_TIMESTAMP(_ADA_DATETIME_MIXIN, TIMESTAMP):
 
     def bind_processor(self, dialect):
         def process(value):
-            return value.strftime("%Y-%m-%d %H:%M:%S.") + self.ms(value) if isinstance(value, self.py_type) else value
+            # See _ADA_TIME: isoformat carries the offset for tz-aware values.
+            return value.isoformat(sep=" ", timespec="microseconds") if isinstance(value, self.py_type) else value
 
         return process
 
