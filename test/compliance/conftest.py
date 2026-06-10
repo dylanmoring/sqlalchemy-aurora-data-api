@@ -132,12 +132,7 @@ _DATA_API_REJECTED_PARAM_CHARS = ("/slashes/", "more/slashes", "q?marks")
 
 # Tests that exercise behaviours the AWS Data API service contract
 # fundamentally can't satisfy.
-_DATA_API_INCOMPATIBLE_TESTS = (
-    # Data API canonicalises JSON values on the wire -- whitespace and
-    # key ordering are mangled. The test asserts the user's custom
-    # deserializer was called with the EXACT original JSON text.
-    "test_round_trip_custom_json",
-)
+_DATA_API_INCOMPATIBLE_TESTS = ()
 
 
 def pytest_collection_modifyitems(config, items):
