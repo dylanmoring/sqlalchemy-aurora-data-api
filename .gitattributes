@@ -1,0 +1,5 @@
+# LF everywhere, regardless of the machine's core.autocrlf setting.
+* text=auto eol=lf
+# cmd.exe needs CRLF in batch files.
+*.bat text eol=crlf
+*.cmd text eol=crlf
